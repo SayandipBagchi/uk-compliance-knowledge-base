@@ -1,4 +1,28 @@
 # UK Compliance Knowledge Base — UK Financial Regulation Search
+> ### What this repository is
+>
+> An engineering write-up of a retrieval system over the UK retail
+> financial-services rulebook, not the running code. The scrapers pull from FCA,
+> legislation.gov.uk, JMLSG and BIS, and the corpus is redistributable only under
+> each publisher's own terms, so neither the scraped content nor the pipeline is
+> published here.
+>
+> File paths named below (`scripts/scrape-fca-handbook-pdf.ts`,
+> `lib/source-urls.ts` and the rest) describe how that system is organised. They
+> are not files in this repository — do not look for them here.
+>
+> The numbers — 887 source documents, 16,829 chunks, the citation and
+> cite-or-refuse behaviour — are measurements from that internal system.
+>
+> What you can take from it: the source-acquisition strategy, the page-precise
+> citation design, and the refusal discipline, which is the transferable part. For
+> code you can actually run, see
+> [spa-automation-toolkit](https://github.com/sayandip1987/spa-automation-toolkit),
+> [amazon-connect-flow-tools](https://github.com/sayandip1987/amazon-connect-flow-tools)
+> and [humanise-plugin](https://github.com/sayandip1987/humanise-plugin).
+>
+> Nothing here is legal or regulatory advice.
+
 
 A second RAG platform built off the same architecture as Project 1, scaled ~7× and adapted to the UK financial-services regulatory corpus. PRD upload produces a structured regulatory gap analysis instead of a platform map.
 
