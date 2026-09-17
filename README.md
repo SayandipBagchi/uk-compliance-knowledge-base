@@ -24,15 +24,24 @@
 >
 > Nothing here is legal or regulatory advice.
 
-A second RAG platform, built on the same architecture as
-[enterprise-rag-knowledge-base](https://github.com/sayandip1987/enterprise-rag-knowledge-base)
-and scaled about 7 times, adapted to the UK financial-services regulatory corpus.
-Uploading a PRD produces a structured regulatory gap analysis instead of a
-platform map.
+A retrieval system over the UK retail financial-services rulebook, built so that a
+compliance officer who clicks a citation lands on the exact page of the official
+PDF rather than on a homepage. Uploading a PRD produces a structured regulatory
+gap analysis.
 
 > Live: [redacted].netlify.app · JWT-protected
 > Build effort: about 4 to 6 hours, single owner, AI-assisted, architecture reused
 > Internal-team users: about 25 to 30 compliance officers, product owners, legal liaisons
+
+## Grounding, judging and refusal
+
+**Grounding is a citation that resolves, not a better prompt.** The anti-hallucination work here is almost entirely plumbing. Chunk IDs carry the PDF page number, `resolveSource()` turns that into a `#page=N` deep link, and the resolved citation label goes into the model's context as a `[1] <citation>` marker. The model cites a page because a real page number is the only thing in front of it. That is a cheaper and more reliable guarantee than any instruction not to invent rule numbers.
+
+**Refusal is a feature, and it is built rather than requested.** The system prompt instructs the model to escalate when the retrieved context is silent, and the reranker gives that instruction something to act on: out-of-domain questions score 0 to 1 across every candidate, so "the rulebook does not say" is a measurable state rather than a judgement call. On a compliance corpus this matters more than coverage. A confident paraphrase of a rule that does not exist is worse than no answer.
+
+**LLM-as-judge, kept narrow.** GPT-4o-mini reranks on a bounded 0 to 10 scale for one question at a time. It is not asked whether an answer is correct, or whether a regime applies, because those need a specialist. The 8/10 sanity-check result is reported with both misses examined rather than as a headline, and both turned out to return defensible alternative sources, which is the kind of detail an aggregate score hides.
+
+**No fine-tuning.** The corpus changes when the FCA republishes a sourcebook, so `npm run scrape:fca-pdf` followed by a re-ingest is the update path. A fine-tuned model would need retraining on the same cadence and would still not produce a page number you can click.
 
 ## What it does
 
@@ -47,7 +56,7 @@ platform map.
 - Page-precise source citations. Every source badge resolves to the exact page of the official PDF (`...sourcebook/CONC.pdf#page=42`), so a click puts a specialist on the rule text rather than a homepage
 - Routes around bot protection through official content channels. Three of six target sites block direct access: legislation.gov.uk uses AWS WAF, jmlsg.org.uk uses Akamai, and handbook.fca.org.uk is a JS-only Angular SPA. The pipeline routes around all three, via Wayback Machine `id_` snapshots for the first two and the per-sourcebook PDF API at `api-handbook.fca.org.uk` for the third. Zero failures across all 42 FCA sourcebooks
 - Isolated from the sibling knowledge base. Same Qdrant cluster, separate collection (`uk_compliance_kb`), separate JWT secret, separate frontend, separate Netlify project. Payloads, indexes and auth tokens cannot cross between the two platforms
-- 8/10 sanity-check accuracy across in-domain queries. Both misses return defensible alternative sources: FCA SYSC for AML questions is valid AML guidance, and the FCA Approach Document for unauthorised-payment-allocation questions explains the underlying PSR 2017 rule
+- Correct on 8 of 10 sanity-check queries, all in-domain. Both misses return defensible alternative sources: FCA SYSC for AML questions is valid AML guidance, and the FCA Approach Document for unauthorised-payment-allocation questions explains the underlying PSR 2017 rule
 - Every generated answer ends with "This is informational and not legal advice", and the system prompt instructs the model to escalate when the context is silent rather than guess
 
 ## Architecture
@@ -115,16 +124,7 @@ platform map.
 
 The FCA Handbook route mattered most. Probing the URL pattern revealed 42 sourcebooks downloadable as authoritative PDFs, about 80 MB in total, which bypassed the SPA and avoided the multi-hour headless-browser crawl otherwise required.
 
-**Phase 2, scrapers, per-source and checkpointed.** Each scraper is filesystem-checkpointed, so re-running skips sourcebooks already cached on disk:
-
-- `scripts/scrape-bis-pdf.ts` downloads the BIS guidance PDF, parses with `pdf-parse`, splits by form-feed page break, one JSON per page
-- `scripts/scrape-fca-psr-pdf.ts` does the same for the 296-page FCA Approach Document
-- `scripts/scrape-cca-1974.ts` discovers all parts, sections and schedules from `/contents`, fetches each via `web.archive.org/web/2024id_/<url>` to bypass AWS WAF, survives per-page Wayback timeouts, and is rate-limited at about 700 ms between requests
-- `scripts/scrape-psr-2017.ts` takes the same Wayback approach for PSR 2017 (UKSI 2017/752)
-- `scripts/scrape-jmlsg.ts` is a Wayback-based crawler discovering JMLSG pages from the home page and current-guidance index
-- `scripts/scrape-fca-handbook-pdf.ts` downloads each of 42 sourcebooks via the FCA's PDF API, parses with `pdf-parse`, chunks by page (form-feed delimited)
-- `scripts/scrape-fca-handbook.ts` is the original fallback scraper using Wayback, kept as belt and braces after the PDF route superseded it
-- `scripts/scrape-all.ts` orchestrates all six scrapers in sequence, surviving individual failures
+**Phase 2, scrapers, per-source and checkpointed.** Six scrapers, one per source, orchestrated in sequence and each filesystem-checkpointed, so re-running skips sourcebooks already cached on disk. The PDF route is what shaped them: `scripts/scrape-fca-handbook-pdf.ts` pulls all 42 sourcebooks straight from the FCA's PDF API and chunks them on form-feed page breaks, and the earlier Wayback-based handbook scraper is kept as a fallback rather than deleted. The Wayback scrapers for CCA 1974, PSR 2017 and JMLSG are rate-limited at about 700 ms between requests and survive per-page timeouts.
 
 Scrapers write JSON of shape:
 
@@ -158,14 +158,12 @@ Scrapers write JSON of shape:
 
 Resolved citation labels feed into the GPT-4o context as `[1] <citation>` markers, so generated answers cite real page numbers rather than fabricated rule numbers.
 
-**Phase 6, production deployment.** Separate GitHub repo, separate Netlify project, auto-deploy on push to `main`. First build completed in 47 seconds. All env vars imported as Netlify secret values via `.env` paste at deploy time.
+**Phase 6, production deployment.** Separate GitHub repo, separate Netlify project, auto-deploy on push to `main`. All env vars imported as Netlify secret values via `.env` paste at deploy time.
 
 **Phase 7, live bug fixes after launch.** Two bugs surfaced in the first user session and were fixed within minutes:
 
 1. **GFM table renderer mangling cells.** `splitTableRow` used a literal space as the sentinel for escaped pipes, so every space inside a cell got replaced with `|` on the way back. Fixed with a `line.split(/(?<!\\)\|/)` negative-lookbehind split, unit-tested before push.
 2. **FCA Handbook badges pointing at the SPA root.** Chunk IDs already carried PDF page numbers, but badges resolved to `/handbook/CONC`, the sourcebook overview with no page. The new `resolveSource()` helper routes them to `…/CONC.pdf#page=N`, and the badge UI now shows `FCA Handbook — CONC, p. 42`.
-
-Both fixes shipped via `git push`, Netlify auto-rebuilt, and the new bundle was live within about 50 seconds.
 
 ## Knowledge base coverage
 
@@ -206,16 +204,6 @@ A regulatory corpus punishes sloppy context construction harder than a product c
 
 **Scope the context before filling it.** The intent classifier narrows to at most 3 of 6 sources before retrieval runs, so a CONC question does not spend window space on CASS passages. When the classifier returns nothing, the filter is dropped rather than guessed at, because a wrong scope is worse than a wide one on a corpus where the answer may genuinely sit in an unexpected sourcebook.
 
-## Grounding, judging and refusal
-
-**Grounding is a citation that resolves, not a better prompt.** The anti-hallucination work here is almost entirely plumbing. Chunk IDs carry the PDF page number, `resolveSource()` turns that into a `#page=N` deep link, and the resolved citation label goes into the model's context as a `[1] <citation>` marker. The model cites a page because a real page number is the only thing in front of it. That is a cheaper and more reliable guarantee than any instruction not to invent rule numbers.
-
-**Refusal is a feature, and it is built rather than requested.** The system prompt instructs the model to escalate when the retrieved context is silent, and the reranker gives that instruction something to act on: out-of-domain questions score 0 to 1 across every candidate, so "the rulebook does not say" is a measurable state rather than a judgement call. On a compliance corpus this matters more than coverage. A confident paraphrase of a rule that does not exist is worse than no answer.
-
-**LLM-as-judge, kept narrow.** GPT-4o-mini reranks on a bounded 0 to 10 scale for one question at a time. It is not asked whether an answer is correct, or whether a regime applies, because those need a specialist. The 8/10 sanity-check result is reported with both misses examined rather than as a headline, and both turned out to return defensible alternative sources, which is the kind of detail an aggregate score hides.
-
-**No fine-tuning.** The corpus changes when the FCA republishes a sourcebook, so `npm run scrape:fca-pdf` followed by a re-ingest is the update path. A fine-tuned model would need retraining on the same cadence and would still not produce a page number you can click.
-
 ## Operational costs
 
 | Service | Free Tier | Estimated Monthly (Production) |
@@ -225,4 +213,6 @@ A regulatory corpus punishes sloppy context construction harder than a product c
 | Qdrant Cloud | 1 GB free | $0 (16,829 × 1536-dim points fits comfortably) |
 | Netlify | 100 GB bandwidth, 125 K functions | $0 |
 
-**Why this build took 4 to 6 hours despite about 7 times the data:** the architecture, Next.js scaffolding, intent-classifier prompt, reranker and JWT layer were lifted directly from the sibling knowledge base. New work was scoped to source discovery and per-regulator scrapers, the page-precise citation resolver, the PRD analysis prompt re-targeted at regulatory gap analysis, and the "not legal advice" discipline. Reuse was the multiplier.
+**Why this build took 4 to 6 hours despite about 7 times the data:** the architecture, Next.js scaffolding, intent-classifier prompt, reranker and JWT layer were lifted directly from
+[enterprise-rag-knowledge-base](https://github.com/sayandip1987/enterprise-rag-knowledge-base),
+the sibling knowledge base. New work was scoped to source discovery and per-regulator scrapers, the page-precise citation resolver, the PRD analysis prompt re-targeted at regulatory gap analysis, and the "not legal advice" discipline. Reuse was the multiplier.
